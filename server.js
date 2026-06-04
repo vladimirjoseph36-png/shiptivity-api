@@ -3,12 +3,12 @@ const Database = require('better-sqlite3');
 
 const app = express();
 
-// Middleware JSON
+// Middleware
 app.use(express.json());
 
 // ROOT
 app.get('/', (req, res) => {
-  return res.status(200).send({
+  res.status(200).send({
     message: 'SHIPTIVITY API. Read documentation to see API docs'
   });
 });
@@ -21,7 +21,7 @@ const closeDb = () => db.close();
 process.on('SIGTERM', closeDb);
 process.on('SIGINT', closeDb);
 
-// VALIDATION ID
+// VALIDATE ID
 const validateId = (id) => {
   if (Number.isNaN(id)) {
     return {
@@ -90,7 +90,7 @@ app.get('/api/v1/clients/:id', (req, res) => {
   return res.status(200).send(client);
 });
 
-// PUT
+// PUT (UPGRADED VERSION - DRAG & DROP + PRIORITY)
 app.put('/api/v1/clients/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
 
@@ -103,28 +103,73 @@ app.put('/api/v1/clients/:id', (req, res) => {
 
   let { status, priority } = req.body;
 
-  status = status || client.status;
+  const newStatus = status || client.status;
+  const oldStatus = client.status;
+  const oldPriority = client.priority;
 
-  let clients = db.prepare(
-    'SELECT * FROM clients WHERE status = ? ORDER BY priority'
-  ).all(status);
-
-  clients = clients.filter(c => c.id !== id);
-
-  if (!priority || priority < 1) {
-    priority = clients.length + 1;
+  if (!['backlog', 'in-progress', 'complete'].includes(newStatus)) {
+    return res.status(400).send({
+      message: 'Invalid status provided.',
+      long_message: 'Status must be backlog | in-progress | complete'
+    });
   }
 
-  clients.splice(priority - 1, 0, {
-    ...client,
-    status,
-    priority
-  });
+  let clients = db.prepare('SELECT * FROM clients').all();
 
-  clients = clients.map((c, index) => ({
-    ...c,
-    priority: index + 1
-  }));
+  // SAME STATUS → reorder
+  if (oldStatus === newStatus && priority && oldPriority !== priority) {
+    const sameStatus = clients
+      .filter(c => c.status === newStatus && c.id !== id)
+      .sort((a, b) => a.priority - b.priority);
+
+    sameStatus.splice(priority - 1, 0, {
+      ...client,
+      status: newStatus,
+      priority
+    });
+
+    const updated = sameStatus.map((c, i) => ({
+      ...c,
+      priority: i + 1
+    }));
+
+    clients = clients
+      .filter(c => c.status !== newStatus)
+      .concat(updated);
+  }
+
+  // DIFFERENT STATUS → move card
+  else if (oldStatus !== newStatus) {
+    const oldList = clients
+      .filter(c => c.status === oldStatus && c.id !== id)
+      .sort((a, b) => a.priority - b.priority);
+
+    const newList = clients
+      .filter(c => c.status === newStatus)
+      .sort((a, b) => a.priority - b.priority);
+
+    const moved = {
+      ...client,
+      status: newStatus,
+      priority: priority || newList.length + 1
+    };
+
+    newList.splice(moved.priority - 1, 0, moved);
+
+    const updatedNew = newList.map((c, i) => ({
+      ...c,
+      priority: i + 1
+    }));
+
+    const updatedOld = oldList.map((c, i) => ({
+      ...c,
+      priority: i + 1
+    }));
+
+    clients = clients
+      .filter(c => c.status !== oldStatus && c.status !== newStatus)
+      .concat(updatedOld, updatedNew);
+  }
 
   const update = db.prepare(`
     UPDATE clients
@@ -132,9 +177,9 @@ app.put('/api/v1/clients/:id', (req, res) => {
     WHERE id = ?
   `);
 
-  for (const c of clients) {
+  clients.forEach(c => {
     update.run(c.status, c.priority, c.id);
-  }
+  });
 
   const allClients = db.prepare(
     'SELECT * FROM clients ORDER BY status, priority'
@@ -143,7 +188,7 @@ app.put('/api/v1/clients/:id', (req, res) => {
   return res.status(200).send(allClients);
 });
 
-// CREATE (POST)
+// POST (CREATE)
 app.post('/api/v1/clients', (req, res) => {
   const { name, description, status, priority } = req.body;
 
@@ -162,7 +207,7 @@ app.post('/api/v1/clients', (req, res) => {
     name,
     description || "",
     status || "backlog",
-    priority ?? 1
+    priority || 1
   );
 
   const newClient = db.prepare(
